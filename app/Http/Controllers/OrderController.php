@@ -14,7 +14,50 @@ use Illuminate\Support\Facades\Log;
 
 class OrderController extends Controller
 {
-    // Add to cart
+    // Add to cart - BEFORE (With Out Lock)
+    public function addToOrderWithOutLock(StoreOrderRequest $request)
+    {
+        $user_id = Auth::id();
+
+        DB::beginTransaction();
+
+        try {
+            $product = Product::where('id', $request->product_id)
+                ->first();
+
+            if (!$product) {
+                return response()->json(['message' => 'product not found'], 404);
+            }
+
+            if ($product->quantity < $request->amount) {
+                DB::rollBack();
+                return response()->json(['message' => 'The quantity is not enough'], 400);
+            }
+
+            $order = Order::create([
+                'user_id' => $user_id,
+                'product_id' => $request->product_id,
+                'color' => $request->color,
+                'amount' => $request->amount,
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Added to cart successfully',
+                'order' => $order
+            ], 201);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'message' => 'Error',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+    // Add to cart - AFTER (With Lock)
     public function addToOrder(StoreOrderRequest $request)
     {
         $user_id = Auth::id();
@@ -111,6 +154,146 @@ class OrderController extends Controller
 
 // 1. Race Condition:Pessimistic locking:LockForUpdate()+Transaction
 // 2. Throttle Middleware+Caching+Query Optimization
+// Checkout - BEFORE (With Out Lock)
+    public function confirmOrderWithoutLock(Request $request)
+    { 
+        $request->validate([
+            'address' => 'required'
+        ]);
+
+        $user_id = Auth::id();
+
+        DB::beginTransaction();
+
+        try {
+            $orders = Order::where('user_id', $user_id)->get();
+
+            if ($orders->isEmpty()) {
+                return response()->json(['message' => 'No orders found'], 400);
+            }
+
+            $products = Product::whereIn('id', $orders->pluck('product_id'))
+                ->get()
+                ->keyBy('id');
+
+            $totalPrice = 0;
+
+            foreach ($orders as $order) {
+
+                $product = $products[$order->product_id];
+
+                if (!$product) {
+                    throw new \Exception('Product not found');
+                }
+
+                // خصم مباشر بدون أي تحقق (ممكن يصير سالب)
+                $product->quantity -= $order->amount;
+                $product->save();
+
+                $totalPrice += $order->amount * $product->price;
+            }
+
+            Order::where('user_id', $user_id)->delete();
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Order confirmed successfully',
+                'Total Price' => $totalPrice
+            ]);
+
+        } catch (\Exception $e) {
+
+            DB::rollBack();
+
+            return response()->json([
+                'message' => 'Error while confirming order',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+// Checkout - AFTER (With Lock)
+    public function confirmOrder(Request $request)
+    {
+        $request->validate([
+            'address' => 'required'
+        ]);
+
+        $user_id = Auth::id();
+
+        DB::beginTransaction();
+
+        try {
+
+            // جلب كل طلبات المستخدم
+            $orders = Order::where('user_id', $user_id)->get();
+
+            if ($orders->isEmpty()) {
+                return response()->json([
+                    'message' => 'No orders found'
+                ], 400);
+            }
+
+            // جلب المنتجات مع Pessimistic Lock
+            $products = Product::whereIn('id', $orders->pluck('product_id'))
+                ->lockForUpdate()
+                ->get()
+                ->keyBy('id');
+
+            $totalPrice = 0;
+
+            foreach ($orders as $order) {
+
+                $product = $products[$order->product_id] ?? null;
+
+                if (!$product) {
+                    throw new \Exception('Product not found');
+                }
+
+                // التحقق من الكمية
+                if ($product->quantity < $order->amount) {
+
+                    DB::rollBack();
+
+                    return response()->json([
+                        'message' => 'Not enough quantity for product: ' . $product->name
+                    ], 400);
+                }
+
+                // إنقاص الكمية
+                $product->quantity -= $order->amount;
+                $product->save();
+
+                // حساب السعر
+                $totalPrice += $order->amount * $product->price;
+            }
+
+            // حذف السلة
+            Order::where('user_id', $user_id)->delete();
+
+            DB::commit();
+
+            return response()->json([
+                'message' => 'Order confirmed successfully',
+                'Total Price' => $totalPrice
+            ]);
+
+        } catch (\Exception $e) {
+
+            DB::rollBack();
+
+            return response()->json([
+                'message' => 'Error while confirming order',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+
+
+
+
 
 // Checkout - BEFORE (Synchronous)
     public function confirmOrderSync(Request $request)

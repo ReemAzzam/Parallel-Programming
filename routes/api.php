@@ -10,7 +10,8 @@ Route::post('register', [UserController::class, 'register']);
 Route::post('login', [UserController::class, 'login']);
 
 
-Route::get('products', [ProductController::class, 'index']);
+Route::get('products/before', [ProductController::class, 'indexBefore']);
+Route::get('products/after', [ProductController::class, 'indexAfter']);
 Route::get('products/{id}', [ProductController::class, 'displayOneProduct']);
 
 Route::get('daily-report-before', [ReportController::class, 'generateDailyReport']);

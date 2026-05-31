@@ -24,6 +24,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 Route::middleware(['auth:sanctum', 'throttle:10,1'])->group(function () {
 
+    Route::post('cart/add-no-lock', [OrderController::class, 'addToOrderWithoutLock']);
     Route::post('cart/add', [OrderController::class, 'addToOrder']);
     Route::put('cart/update/{id}', [OrderController::class, 'updateOrder']);
     Route::delete('cart/remove/{id}', [OrderController::class, 'cancelOrder']);

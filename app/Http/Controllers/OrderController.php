@@ -15,7 +15,7 @@ use Illuminate\Support\Facades\Log;
 class OrderController extends Controller
 {
     // Add to cart - BEFORE (With Out Lock)
-    public function addToOrderWithOutLock(StoreOrderRequest $request)
+    public function addToOrderWithoutLock(StoreOrderRequest $request)
     {
         $user_id = Auth::id();
 
@@ -186,7 +186,6 @@ class OrderController extends Controller
                     throw new \Exception('Product not found');
                 }
 
-                // خصم مباشر بدون أي تحقق (ممكن يصير سالب)
                 $product->quantity -= $order->amount;
                 $product->save();
 
@@ -226,7 +225,6 @@ class OrderController extends Controller
 
         try {
 
-            // جلب كل طلبات المستخدم
             $orders = Order::where('user_id', $user_id)->get();
 
             if ($orders->isEmpty()) {
@@ -235,7 +233,6 @@ class OrderController extends Controller
                 ], 400);
             }
 
-            // جلب المنتجات مع Pessimistic Lock
             $products = Product::whereIn('id', $orders->pluck('product_id'))
                 ->lockForUpdate()
                 ->get()
@@ -251,7 +248,6 @@ class OrderController extends Controller
                     throw new \Exception('Product not found');
                 }
 
-                // التحقق من الكمية
                 if ($product->quantity < $order->amount) {
 
                     DB::rollBack();
@@ -261,15 +257,12 @@ class OrderController extends Controller
                     ], 400);
                 }
 
-                // إنقاص الكمية
                 $product->quantity -= $order->amount;
                 $product->save();
 
-                // حساب السعر
                 $totalPrice += $order->amount * $product->price;
             }
 
-            // حذف السلة
             Order::where('user_id', $user_id)->delete();
 
             DB::commit();
@@ -364,76 +357,75 @@ class OrderController extends Controller
         return response()->json(['message' => 'Error while confirming order'], 500);
     }
     }
+//3. Checkout - AFTER (Asynchronous)
+    public function confirmOrderAsync(Request $request)
+    {
+    $startTime = microtime(true);
 
-    //3. Checkout - AFTER (Asynchronous)
-public function confirmOrderAsync(Request $request)
-{
-   $startTime = microtime(true);
+        $request->validate(['address' => 'required']);
 
-    $request->validate(['address' => 'required']);
+        $user_id = Auth::id();
 
-    $user_id = Auth::id();
+        DB::beginTransaction();
 
-    DB::beginTransaction();
+        try {
+            $orders = Order::where('user_id', $user_id)->with('product')->get();
 
-    try {
-        $orders = Order::where('user_id', $user_id)->with('product')->get();
-
-        if ($orders->isEmpty()) {
-            return response()->json(['message' => 'No orders found'], 400);
-        }
-
-        $products = Product::whereIn('id', $orders->pluck('product_id'))
-            ->lockForUpdate()
-            ->get()
-            ->keyBy('id');
-
-        $totalPrice = 0;
-
-        foreach ($orders as $order) {
-            $product = $products[$order->product_id] ?? null;
-            if (!$product) throw new \Exception('Product not found');
-
-            if ($product->quantity < $order->amount) {
-                DB::rollBack();
-                return response()->json(['message' => 'Not enough quantity'], 400);
+            if ($orders->isEmpty()) {
+                return response()->json(['message' => 'No orders found'], 400);
             }
 
-            $product->quantity -= $order->amount;
-            $product->save();
+            $products = Product::whereIn('id', $orders->pluck('product_id'))
+                ->lockForUpdate()
+                ->get()
+                ->keyBy('id');
 
-            $totalPrice += $order->amount * $product->price;
+            $totalPrice = 0;
+
+            foreach ($orders as $order) {
+                $product = $products[$order->product_id] ?? null;
+                if (!$product) throw new \Exception('Product not found');
+
+                if ($product->quantity < $order->amount) {
+                    DB::rollBack();
+                    return response()->json(['message' => 'Not enough quantity'], 400);
+                }
+
+                $product->quantity -= $order->amount;
+                $product->save();
+
+                $totalPrice += $order->amount * $product->price;
+            }
+
+            Order::where('user_id', $user_id)->delete();
+
+            DB::commit();
+
+            // ====================== ASYNCHRONOUS ======================
+            Log::info(" [AFTER] تم حفظ الطلب بنجاح → Job dispatched to Queue", ['user_id' => $user_id]);
+            echo " [AFTER] تم حفظ الطلب بنجاح - Job dispatched to background queue for user: {$user_id}\n";
+
+            // إرسال الـ Job
+            \App\Jobs\ProcessOrderConfirmation::dispatch($user_id, $totalPrice, $orders->toArray())
+                ->onQueue('orders')
+                ->delay(now()->addSeconds(2));
+
+            $duration = round((microtime(true) - $startTime) * 1000, 2);
+
+            return response()->json([
+                'message' => 'Order confirmed successfully',
+                'Total Price' => $totalPrice,
+                'version' => 'AFTER - Asynchronous',
+                'duration_ms' => $duration,
+                'note' => 'All heavy work moved to background queue'
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("Error in AFTER confirmOrder", ['error' => $e->getMessage()]);
+            return response()->json(['message' => 'Error', 'error' => $e->getMessage()], 500);
         }
-
-        Order::where('user_id', $user_id)->delete();
-
-        DB::commit();
-
-        // ====================== ASYNCHRONOUS ======================
-        Log::info(" [AFTER] تم حفظ الطلب بنجاح → Job dispatched to Queue", ['user_id' => $user_id]);
-        echo " [AFTER] تم حفظ الطلب بنجاح - Job dispatched to background queue for user: {$user_id}\n";
-
-        // إرسال الـ Job
-        \App\Jobs\ProcessOrderConfirmation::dispatch($user_id, $totalPrice, $orders->toArray())
-            ->onQueue('orders')
-            ->delay(now()->addSeconds(2));
-
-        $duration = round((microtime(true) - $startTime) * 1000, 2);
-
-        return response()->json([
-            'message' => 'Order confirmed successfully',
-            'Total Price' => $totalPrice,
-            'version' => 'AFTER - Asynchronous',
-            'duration_ms' => $duration,
-            'note' => 'All heavy work moved to background queue'
-        ]);
-
-    } catch (\Exception $e) {
-        DB::rollBack();
-        Log::error("Error in AFTER confirmOrder", ['error' => $e->getMessage()]);
-        return response()->json(['message' => 'Error', 'error' => $e->getMessage()], 500);
     }
-}
 
 
 }

@@ -29,10 +29,15 @@ Route::middleware(['auth:sanctum', 'throttle:10,1'])->group(function () {
     Route::put('cart/update/{id}', [OrderController::class, 'updateOrder']);
     Route::delete('cart/remove/{id}', [OrderController::class, 'cancelOrder']);
     Route::get('cart', [OrderController::class, 'getUserOrders']);
-    Route::post('checkout-no-lock', [OrderController::class, 'confirmOrderWithoutLock']);
-    Route::post('checkout', [OrderController::class, 'confirmOrder']);
+    Route::post('checkout-Before-PessimisticLock', [OrderController::class, 'confirmOrderWithoutPLock']);
+    Route::post('checkout-After-PessimisticLock', [OrderController::class, 'confirmOrderWithPLock']);
+
+    Route::post('checkout-Before-DistributedLock',[OrderController::class, 'confirmOrderWithoutDLock']);
+    Route::post('checkout-After-DistributedLock', [OrderController::class, 'confirmOrderWithDLock']);
+    
     Route::post('checkout-async', [OrderController::class, 'confirmOrderAsync']);
     Route::post('checkout-sync',[OrderController::class, 'confirmOrderSync']);
+
 
 });
 

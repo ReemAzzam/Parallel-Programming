@@ -6,6 +6,7 @@ use App\Http\Requests\StoreOrderRequest;
 
 use App\Models\Order;
 use App\Models\Product;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -154,9 +155,9 @@ class OrderController extends Controller
 
 // 1. Race Condition:Pessimistic locking:LockForUpdate()+Transaction
 // 2. Throttle Middleware+Caching+Query Optimization
-// Checkout - BEFORE (With Out Lock)
-    public function confirmOrderWithoutLock(Request $request)
-    { 
+// Checkout - BEFORE (WithOut Lock)
+    public function confirmOrderWithoutPLock(Request $request)
+    {
         $request->validate([
             'address' => 'required'
         ]);
@@ -213,7 +214,7 @@ class OrderController extends Controller
     }
 
 // Checkout - AFTER (With Lock)
-    public function confirmOrder(Request $request)
+    public function confirmOrderWithPLock(Request $request)
     {
         $request->validate([
             'address' => 'required'
@@ -427,5 +428,119 @@ class OrderController extends Controller
         }
     }
 
+    // BEFORE DISTRIBUTED LOCK - No Concurrency Control
+public function confirmOrderWithoutDLock(Request $request)
+{
+    $startTime = microtime(true);
+    $user_id = Auth::id();
+
+    DB::beginTransaction();
+
+    try {
+        $orders = Order::where('user_id', $user_id)->with('product')->get();
+
+        if ($orders->isEmpty()) {
+            return response()->json(['message' => 'No orders found'], 400);
+        }
+
+        $totalPrice = 0;
+
+        foreach ($orders as $order) {
+            $product = Product::find($order->product_id);  // بدون lock
+
+            if (!$product) throw new \Exception('Product not found');
+
+            if ($product->quantity < $order->amount) {
+                DB::rollBack();
+                return response()->json(['message' => 'Not enough quantity'], 400);
+            }
+
+            $product->quantity -= $order->amount;
+            $product->save();   // ← هنا ممكن يحصل Race Condition
+
+            $totalPrice += $order->amount * $product->price;
+        }
+
+        Order::where('user_id', $user_id)->delete();
+        DB::commit();
+
+        echo "start processing confirmation for user " . $user_id . "\n";
+        sleep(2);
+        echo "done processing confirmation for user " . $user_id . "\n";
+
+        return response()->json([
+            'message' => 'Order confirmed successfully',
+            'version' => 'BEFORE - No Lock (Race Condition Possible)',
+            'duration_ms' => round((microtime(true) - $startTime) * 1000, 2)
+        ]);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json(['message' => 'Error'], 500);
+    }
+}
+
+// AFTER - Distributed Lock using Redis(7Q)
+public function confirmOrderWithDLock(Request $request)
+{
+    $startTime = microtime(true);
+    $user_id = Auth::id();
+
+    // ====================== Distributed Lock ======================
+    $lockKey = "checkout_lock_user_{$user_id}";
+    $lock = Cache::lock($lockKey, 10); // 10 ثواني timeout
+
+    if (!$lock->get()) {
+        return response()->json([
+            'message' => 'Another operation is processing. Please try again later.'
+        ], 429);
+    }
+
+    try {
+        DB::beginTransaction();
+
+        $orders = Order::where('user_id', $user_id)->with('product')->get();
+
+        if ($orders->isEmpty()) {
+            return response()->json(['message' => 'No orders found'], 400);
+        }
+
+        $totalPrice = 0;
+
+        foreach ($orders as $order) {
+            $product = Product::find($order->product_id);
+
+            if (!$product) throw new \Exception('Product not found');
+
+            if ($product->quantity < $order->amount) {
+                DB::rollBack();
+                return response()->json(['message' => 'Not enough quantity'], 400);
+            }
+
+            $product->quantity -= $order->amount;
+            $product->save();
+
+            $totalPrice += $order->amount * $product->price;
+        }
+
+        Order::where('user_id', $user_id)->delete();
+        DB::commit();
+
+        // Async Job
+        \App\Jobs\ProcessOrderConfirmation::dispatch($user_id, $totalPrice, $orders->toArray());
+
+        echo "start processing confirmation for user " . $user_id . "\n";
+        echo "done processing confirmation for user " . $user_id . "\n";
+
+        return response()->json([
+            'message' => 'Order confirmed successfully',
+            'version' => 'AFTER - Distributed Lock (Redis)',
+            'duration_ms' => round((microtime(true) - $startTime) * 1000, 2)
+        ]);
+
+    } finally {
+        $lock->release(); // مهم جداً
+    }
+}
 
 }
